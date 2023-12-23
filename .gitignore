@@ -1,0 +1,23 @@
+# Python
+*.pyc
+*.pyo
+__pycache__/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Logs
+logs/
+
+# Virtual environment
+venv/
+.env/
+
+# Compiled files
+*.pyd
+*.so
+*.dll
+
+# macOS
+.DS_Store
+

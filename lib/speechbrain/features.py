@@ -492,6 +492,37 @@ class Filterbank(nn.Module):
         return self.forward(*args, **kwds)
 
 
+def spectral_magnitude(stft, power: int = 1, log: bool = False, eps: float = 1e-14):
+    """Returns the magnitude of a complex spectrogram.
+
+    Arguments
+    ---------
+    stft : torch.Tensor
+        A tensor, output from the stft function.
+    power : int
+        What power to use in computing the magnitude.
+        Use power=1 for the power spectrogram.
+        Use power=0.5 for the magnitude spectrogram.
+    log : bool
+        Whether to apply log to the spectral features.
+
+    Example
+    -------
+    >>> a = torch.Tensor([[3, 4]])
+    >>> spectral_magnitude(a, power=0.5)
+    tensor([5.])
+    """
+    spectr = mx.power(stft, 2).sum(-1)
+    # Add eps avoids NaN when spectr is zero
+    if power < 1:
+        spectr = spectr + eps
+    spectr = mx.power(spectr, power)
+
+    if log:
+        return mx.log(spectr + eps)
+    return spectr
+
+
 if __name__ == "__main__":
     # test STFT
     x = mx.random.normal([1, 4001])
@@ -504,3 +535,7 @@ if __name__ == "__main__":
     inputs = mx.random.normal([10, 101, 201])
     features = compute_fbanks(inputs)
     print(features.shape)
+
+    # test spectral_magnitude
+    a = mx.array([[3, 4]])
+    print(spectral_magnitude(a, power=0.5))

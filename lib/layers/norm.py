@@ -4,7 +4,7 @@ from mlx.nn.layers.base import Module
 import mlx.core as mx
 
 
-class BatchNorm(Module):
+class BatchNorm1d(Module):
     r"""Applies Batch Normalization over a 2D or 3D input.
     Computes
     .. math::

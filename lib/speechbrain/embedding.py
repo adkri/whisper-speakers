@@ -8,8 +8,9 @@ import math
 import numpy as np
 import mlx.core as mx
 import mlx.nn as nn
-from ..layers.norm import BatchNorm
+from lib.layers.norm import BatchNorm1d as MLXBathNorm1d
 from mlx.nn import Conv1d as MLXConv1d, ReLU as MLXReLU
+from lib.layers.conv import Conv1d as ConvLayer, BatchNorm1d as BatchNormLayer
 from typing import Any
 
 
@@ -41,6 +42,18 @@ def get_padding_elem(L_in: int, stride: int, kernel_size: int, dilation: int):
             math.floor((L_in - L_out) / 2),
         ]
     return padding
+
+
+# Dummy
+class Tanh(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+
+# Dummy
+class Sigmoid(nn.Module):
+    def __init__(self):
+        super().__init__()
 
 
 class Conv1d(nn.Module):
@@ -275,7 +288,7 @@ class BatchNorm1d(nn.Module):
         elif input_size is None:
             input_size = input_shape[-1]
 
-        self.norm = BatchNorm(
+        self.norm = MLXBathNorm1d(
             num_features=input_size,
             eps=eps,
             momentum=momentum,
@@ -353,13 +366,13 @@ class TDNNBlock(nn.Module):
         super(TDNNBlock, self).__init__()
         self.in_channels = in_channels
         self.kernel_size = kernel_size
-        self.conv = MLXConv1d(
+        self.conv = ConvLayer(
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=kernel_size,
         )
         self.activation = MLXReLU()
-        self.norm = BatchNorm(out_channels)
+        self.norm = BatchNormLayer(out_channels)
 
     def forward(self, x):
         """Processes the input tensor x and returns an output tensor."""
@@ -504,6 +517,7 @@ class SEBlock(nn.Module):
         self.conv2 = MLXConv1d(
             in_channels=se_channels, out_channels=out_channels, kernel_size=1
         )
+        self.sigmoid = Sigmoid()
 
     def forward(self, x, lengths=None):
         """Processes the input tensor x and returns an output tensor."""
@@ -558,7 +572,8 @@ class AttentiveStatisticsPooling(nn.Module):
             self.tdnn = TDNNBlock(channels * 3, attention_channels, 1, 1)
         else:
             self.tdnn = TDNNBlock(channels, attention_channels, 1, 1)
-        self.conv = MLXConv1d(
+        self.tanh = Tanh()
+        self.conv = ConvLayer(
             in_channels=attention_channels, out_channels=channels, kernel_size=1
         )
 

@@ -8,53 +8,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from torch.profiler import profile, record_function, ProfilerActivity
+
+import mlx.core as mx
+from ..layers.norm import BatchNorm
+from mlx.nn import Conv1d as MLXConv1d, ReLU as MLXReLU
+from typing import Tuple
 
 
-def length_to_mask(length, max_len=None, dtype=None, device=None):
-    """Creates a binary mask for each sequence.
-
-    Reference: https://discuss.pytorch.org/t/how-to-generate-variable-length-mask/23397/3
-
-    Arguments
-    ---------
-    length : torch.LongTensor
-        Containing the length of each sequence in the batch. Must be 1D.
-    max_len : int
-        Max length for the mask, also the size of the second dimension.
-    dtype : torch.dtype, default: None
-        The dtype of the generated mask.
-    device: torch.device, default: None
-        The device to put the mask variable.
-
-    Returns
-    -------
-    mask : tensor
-        The binary mask.
-
-    Example
-    -------
-    >>> length=torch.Tensor([1,2,3])
-    >>> mask=length_to_mask(length)
-    >>> mask
-    tensor([[1., 0., 0.],
-            [1., 1., 0.],
-            [1., 1., 1.]])
-    """
+def length_to_mask_mx(length, max_len=None, dtype=np.float32):
+    print(type(length))
     assert len(length.shape) == 1
-
     if max_len is None:
-        max_len = length.max().long().item()  # using arange to generate mask
-    mask = torch.arange(max_len, device=length.device, dtype=length.dtype).expand(
-        len(length), max_len
-    ) < length.unsqueeze(1)
-
-    if dtype is None:
-        dtype = length.dtype
-
-    if device is None:
-        device = length.device
-
-    mask = torch.as_tensor(mask, dtype=dtype, device=device)
+        max_len = np.max(length)
+    mask = np.arange(max_len)[None, :] < length[:, None]
+    mask = mask.astype(dtype)
     return mask
 
 
@@ -163,27 +131,14 @@ class Conv1d(nn.Module):
 
         self.in_channels = in_channels
 
-        self.conv = nn.Conv1d(
+        self.mlx_conv = MLXConv1d(
             in_channels,
             out_channels,
             self.kernel_size,
             stride=self.stride,
-            dilation=self.dilation,
             padding=default_padding,
-            groups=groups,
             bias=bias,
-            device=torch.device("mps"),
         )
-
-        if conv_init == "kaiming":
-            nn.init.kaiming_normal_(self.conv.weight)
-        elif conv_init == "zero":
-            nn.init.zeros_(self.conv.weight)
-        elif conv_init == "normal":
-            nn.init.normal_(self.conv.weight, std=1e-6)
-
-        if weight_norm:
-            self.conv = nn.utils.weight_norm(self.conv)
 
     def forward(self, x):
         """Returns the output of the convolution.
@@ -193,18 +148,16 @@ class Conv1d(nn.Module):
         x : torch.Tensor (batch, time, channel)
             input to convolve. 2d or 4d tensors are expected.
         """
-        if not self.skip_transpose:
-            x = x.transpose(1, -1)
-
-        if self.unsqueeze:
-            x = x.unsqueeze(1)
-
+        x = x.cpu().numpy()
         if self.padding == "same":
             x = self._manage_padding(x, self.kernel_size, self.dilation, self.stride)
 
         elif self.padding == "causal":
             num_pad = (self.kernel_size - 1) * self.dilation
-            x = F.pad(x, (num_pad, 0))
+            # x = x.cpu().numpy()
+            padding_spec = [(0, 0)] * (x.ndim) + [(num_pad, 0)]
+            x = np.pad(x, padding_spec, mode="constant", constant_values=0)
+            # x = torch.from_numpy(x).to(torch.device("mps"))
 
         elif self.padding == "valid":
             pass
@@ -214,14 +167,12 @@ class Conv1d(nn.Module):
                 "Padding must be 'same', 'valid' or 'causal'. Got " + self.padding
             )
 
-        wx = self.conv(x)
-
-        if self.unsqueeze:
-            wx = wx.squeeze(1)
-
-        if not self.skip_transpose:
-            wx = wx.transpose(1, -1)
-
+        # x = x.permute(0, 2, 1)
+        x = np.transpose(x, (0, 2, 1))
+        wx = torch.from_numpy(np.array(self.mlx_conv(mx.array(x)))).to(
+            torch.device("mps")
+        )
+        wx = wx.permute(0, 2, 1)
         return wx
 
     def _manage_padding(
@@ -245,16 +196,12 @@ class Conv1d(nn.Module):
         stride : int
             Stride.
         """
-
         # Detecting input shape
         L_in = self.in_channels
-
         # Time padding
         padding = get_padding_elem(L_in, stride, kernel_size, dilation)
-
         # Applying padding
-        x = F.pad(x, padding, mode=self.padding_mode)
-
+        x = np.pad(x, padding, mode=self.padding_mode)
         return x
 
     def _check_input_shape(self, shape):
@@ -279,9 +226,9 @@ class Conv1d(nn.Module):
 
         return in_channels
 
-    def remove_weight_norm(self):
-        """Removes weight normalization at inference if used during training."""
-        self.conv = nn.utils.remove_weight_norm(self.conv)
+    # def remove_weight_norm(self):
+    #     """Removes weight normalization at inference if used during training."""
+    #     self.conv = nn.utils.remove_weight_norm(self.conv)
 
 
 class BatchNorm1d(nn.Module):
@@ -336,13 +283,12 @@ class BatchNorm1d(nn.Module):
         elif input_size is None:
             input_size = input_shape[-1]
 
-        self.norm = nn.BatchNorm1d(
-            input_size,
+        self.mlx_norm = BatchNorm(
+            num_features=input_size,
             eps=eps,
             momentum=momentum,
             affine=affine,
-            track_running_stats=track_running_stats,
-            device=torch.device("mps"),
+            track_running_stats=False,
         )
 
     def forward(self, x):
@@ -364,7 +310,8 @@ class BatchNorm1d(nn.Module):
         elif not self.skip_transpose:
             x = x.transpose(-1, 1)
 
-        x_n = self.norm(x)
+        x_n = np.array(self.mlx_norm(mx.array(x.cpu().numpy())))
+        x_n = torch.from_numpy(x_n).to(torch.device("mps"))
 
         if self.combine_batch_time:
             x_n = x_n.reshape(shape_or)
@@ -411,19 +358,85 @@ class TDNNBlock(nn.Module):
         groups=1,
     ):
         super(TDNNBlock, self).__init__()
-        self.conv = Conv1d(
+        # self.conv = Conv1d(
+        #     in_channels=in_channels,
+        #     out_channels=out_channels,
+        #     kernel_size=kernel_size,
+        #     dilation=dilation,
+        #     groups=groups,
+        # )
+        # self.activation = activation()
+        # self.norm = BatchNorm1d(input_size=out_channels, skip_transpose=True)
+        self.in_channels = in_channels
+        self.kernel_size = kernel_size
+        self.conv = MLXConv1d(
             in_channels=in_channels,
             out_channels=out_channels,
             kernel_size=kernel_size,
-            dilation=dilation,
-            groups=groups,
         )
-        self.activation = activation()
-        self.norm = BatchNorm1d(input_size=out_channels, skip_transpose=True)
+
+        self.activation = MLXReLU()
+
+        self.norm = BatchNorm(out_channels)
 
     def forward(self, x):
         """Processes the input tensor x and returns an output tensor."""
-        return self.norm(self.activation(self.conv(x)))
+        x = self._manage_padding(x, self.kernel_size, 1, 1)
+        x = x.permute(0, 2, 1)
+        x = mx.array(x.tolist())
+        print("x.shape", x.shape)
+        out = self.conv(x)
+        print("conv.out.shape", out.shape)
+        out = self.activation(out)
+        print("activation.out.shape", out.shape)
+
+        out = np.transpose(out, (0, 2, 1))
+        out = self.norm(out)
+        print("norm.out.shape", out.shape)
+        return torch.from_numpy(np.array(out)).to(torch.device("mps"))
+
+        # x = x.permute(0, 2, 1)
+        # x = mx.array(x.tolist())
+        # out = self.norm(self.activation(self.conv(x)))
+        # out = torch.from_numpy(np.array(out)).to(torch.device("mps"))
+        # out = out.permute(0, 2, 1)
+        # return out
+
+    def _manage_padding(
+        self,
+        x,
+        kernel_size: int,
+        dilation: int,
+        stride: int,
+    ):
+        """This function performs zero-padding on the time axis
+        such that their lengths is unchanged after the convolution.
+
+        Arguments
+        ---------
+        x : torch.Tensor
+            Input tensor.
+        kernel_size : int
+            Size of kernel.
+        dilation : int
+            Dilation used.
+        stride : int
+            Stride.
+        """
+
+        # Detecting input shape
+        L_in = self.in_channels
+
+        # Time padding
+        padding = get_padding_elem(L_in, stride, kernel_size, dilation)
+
+        # Applying padding
+        x = np.array(x.cpu().tolist(), dtype=np.float32)
+        padding_spec = [(0, 0)] * (x.ndim - 1) + [padding]
+        x = np.pad(x, padding_spec, mode="reflect")
+        x = torch.from_numpy(x).to(torch.device("mps"))
+
+        return x
 
 
 class Res2NetBlock(torch.nn.Module):
@@ -512,30 +525,46 @@ class SEBlock(nn.Module):
     def __init__(self, in_channels, se_channels, out_channels):
         super(SEBlock, self).__init__()
 
-        self.conv1 = Conv1d(
+        self.conv1 = MLXConv1d(
             in_channels=in_channels, out_channels=se_channels, kernel_size=1
         )
-        self.relu = torch.nn.ReLU(inplace=True)
-        self.conv2 = Conv1d(
+        self.relu = MLXReLU()
+        self.conv2 = MLXConv1d(
             in_channels=se_channels, out_channels=out_channels, kernel_size=1
         )
+
+        # self.conv1 = Conv1d(
+        #     in_channels=in_channels, out_channels=se_channels, kernel_size=1
+        # )
+        # self.relu = torch.nn.ReLU(inplace=True)
+        # self.conv2 = Conv1d(
+        #     in_channels=se_channels, out_channels=out_channels, kernel_size=1
+        # )
         self.sigmoid = torch.nn.Sigmoid()
 
     def forward(self, x, lengths=None):
         """Processes the input tensor x and returns an output tensor."""
+
+        x = x.cpu().numpy()
         L = x.shape[-1]
         if lengths is not None:
-            mask = length_to_mask(lengths * L, max_len=L, device=x.device)
-            mask = mask.unsqueeze(1)
-            total = mask.sum(dim=2, keepdim=True)
-            s = (x * mask).sum(dim=2, keepdim=True) / total
+            mask = length_to_mask_mx(lengths * L, max_len=L)
+            mask = np.expand_dims(mask, axis=1)
+            total = np.sum(mask, axis=2, keepdims=True)
+            s = np.sum(x * mask, axis=2, keepdims=True) / total
         else:
-            s = x.mean(dim=2, keepdim=True)
+            s = np.mean(x, axis=2, keepdims=True)
 
+        s = np.transpose(s, (0, 2, 1))
+        s = mx.array(s.tolist())
         s = self.relu(self.conv1(s))
-        s = self.sigmoid(self.conv2(s))
+        s = mx.sigmoid(self.conv2(s))
+        s = np.transpose(s, (0, 2, 1))
 
-        return s * x
+        out = s * mx.array(x)
+        out = torch.from_numpy(np.array(out)).to(torch.device("mps"))
+
+        return out
 
 
 class AttentiveStatisticsPooling(nn.Module):
@@ -568,8 +597,8 @@ class AttentiveStatisticsPooling(nn.Module):
             self.tdnn = TDNNBlock(channels * 3, attention_channels, 1, 1)
         else:
             self.tdnn = TDNNBlock(channels, attention_channels, 1, 1)
-        self.tanh = nn.Tanh()
-        self.conv = Conv1d(
+        # self.tanh = nn.Tanh()
+        self.conv = MLXConv1d(
             in_channels=attention_channels, out_channels=channels, kernel_size=1
         )
 
@@ -581,44 +610,88 @@ class AttentiveStatisticsPooling(nn.Module):
         x : torch.Tensor
             Tensor of shape [N, C, L].
         """
+
+        x = x.cpu().numpy()
         L = x.shape[-1]
 
+        print("x type is", type(x))
+        print("L type is", type(L))
+
         def _compute_statistics(x, m, dim=2, eps=self.eps):
-            mean = (m * x).sum(dim)
-            std = torch.sqrt((m * (x - mean.unsqueeze(dim)).pow(2)).sum(dim).clamp(eps))
+            # mean = (m * x).sum(dim)
+            # std = torch.sqrt((m * (x - mean.unsqueeze(dim)).pow(2)).sum(dim).clamp(eps))
+            mean = np.sum(m * x, axis=dim)
+            std = np.sqrt(
+                np.clip(
+                    np.sum(m * (x - np.expand_dims(mean, axis=dim) ** 2), axis=dim),
+                    a_min=eps,
+                    a_max=None,
+                )
+            )
             return mean, std
 
         if lengths is None:
-            lengths = torch.ones(x.shape[0], device=x.device)
+            lengths = np.ones((x.shape[0]))
+            # lengths = torch.ones(x.shape[0], device=x.device)
+        else:
+            lengths = lengths.cpu().numpy()
 
+        print("lengths type is", type(lengths))
         # Make binary mask of shape [N, 1, L]
-        mask = length_to_mask(lengths * L, max_len=L, device=x.device)
-        mask = mask.unsqueeze(1)
+        # mask = length_to_mask(lengths * L, max_len=L, device=x.device)
+        mask = length_to_mask_mx(lengths * L, max_len=L)
+        # mask = mask.unsqueeze(1)
+        mask = np.expand_dims(mask, axis=1)
 
         # Expand the temporal context of the pooling layer by allowing the
         # self-attention to look at global properties of the utterance.
         if self.global_context:
             # torch.std is unstable for backward computation
             # https://github.com/pytorch/pytorch/issues/4320
-            total = mask.sum(dim=2, keepdim=True).float()
+            # total = mask.sum(dim=2, keepdim=True).float()
+            # mean, std = _compute_statistics(x, mask / total)
+            # mean = mean.unsqueeze(2).repeat(1, 1, L)
+            # std = std.unsqueeze(2).repeat(1, 1, L)
+            # attn = torch.cat([x, mean, std], dim=1)
+            total = np.sum(mask, axis=2, keepdims=True).astype(float)
             mean, std = _compute_statistics(x, mask / total)
-            mean = mean.unsqueeze(2).repeat(1, 1, L)
-            std = std.unsqueeze(2).repeat(1, 1, L)
-            attn = torch.cat([x, mean, std], dim=1)
+            mean = np.repeat(np.expand_dims(mean, axis=2), L, axis=2)
+            std = np.repeat(np.expand_dims(std, axis=2), L, axis=2)
+            attn = np.concatenate([x, mean, std], axis=1)
         else:
             attn = x
 
-        # Apply layers
-        attn = self.conv(self.tanh(self.tdnn(attn)))
+        # attn is numpy array
+        attn_tensor = torch.from_numpy(attn).clone()
 
-        # Filter out zero-paddings
-        attn = attn.masked_fill(mask == 0, float("-inf"))
+        tdnn_out = self.tdnn.forward(attn_tensor)
+        ftr = np.tanh(tdnn_out.cpu().numpy())
 
-        attn = F.softmax(attn, dim=2)
+        ftr = np.transpose(ftr, (0, 2, 1))
+        attn = self.conv(mx.array(ftr))
+        attn = np.transpose(attn, (0, 2, 1))
+
+        attn = np.where(mask == 0, -np.inf, attn)
+
+        attn = np.exp(attn) / np.sum(np.exp(attn), axis=2, keepdims=True)
         mean, std = _compute_statistics(x, attn)
-        # Append mean and std of the batch
-        pooled_stats = torch.cat((mean, std), dim=1)
-        pooled_stats = pooled_stats.unsqueeze(2)
+        pooled_stats = np.concatenate((mean, std), axis=1)
+        pooled_stats = np.expand_dims(pooled_stats, axis=2)
+
+        pooled_stats = torch.from_numpy(pooled_stats).to(torch.device("mps"))
+
+        # # Apply layers
+        # ftr = mx.tanh(self.tdnn(attn))
+        # attn = self.conv(ftr)
+
+        # # Filter out zero-paddings
+        # attn = attn.masked_fill(mask == 0, float("-inf"))
+
+        # attn = mx.softmax(attn, axis=2)
+        # mean, std = _compute_statistics(x, attn)
+        # # Append mean and std of the batch
+        # pooled_stats = torch.cat((mean, std), dim=1)
+        # pooled_stats = pooled_stats.unsqueeze(2)
 
         return pooled_stats
 
@@ -687,7 +760,7 @@ class SERes2NetBlock(nn.Module):
 
         self.shortcut = None
         if in_channels != out_channels:
-            self.shortcut = Conv1d(
+            self.shortcut = MLXConv1d(
                 in_channels=in_channels,
                 out_channels=out_channels,
                 kernel_size=1,
@@ -697,7 +770,9 @@ class SERes2NetBlock(nn.Module):
         """Processes the input tensor x and returns an output tensor."""
         residual = x
         if self.shortcut:
+            x = mx.array(x.tolist())
             residual = self.shortcut(x)
+            residual = torch.from_numpy(np.array(residual)).to(torch.device("mps"))
 
         x = self.tdnn1(x)
         x = self.res2net_block(x)
@@ -855,21 +930,35 @@ if __name__ == "__main__":
         attention_channels=128,
     )
 
+    # load model weights
+    # model_path = (
+    #     "/Users/amit/stream/whisper_tests/spkrec-ecapa-voxceleb/embedding_model.ckpt"
+    # )
+    # ecapa_tdnn.load_state_dict(torch.load(model_path, map_location=torch.device("cpu")))
+
+    ecapa_tdnn.eval()
+
     # test example from audio pipeline
-    features = torch.rand([64, 501, 80]).to(torch.device("mps"))
-    wav_lens = torch.rand([64]).to(torch.device("mps"))
+    features = torch.rand([1, 501, 80]).to(torch.device("mps"))
+    wav_lens = torch.rand([1]).to(torch.device("mps"))
 
     import time
 
-    for _ in range(100):
-        start = time.time()
-        embeddings = ecapa_tdnn.forward(features, wav_lens)
-        end = time.time()
-        print("embeddings.shape: ", embeddings.shape)
-        print("time taken: ", end - start)
-        assert embeddings.shape == (64, 1, 192)
+    with torch.no_grad():
+        for _ in range(1):
+            start = time.time()
+            # with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
+            #     with record_function("model_inference"):
+            embeddings = ecapa_tdnn.forward(features, wav_lens)
+            # print(
+            #     prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=100)
+            # )
+            end = time.time()
+            print("embeddings.shape: ", embeddings.shape)
+            print("time taken: ", end - start)
+            assert embeddings.shape == (64, 1, 192)
 
-        # clear from mps device, otherwise it will throw an memory error
-        # embeddings.cpu()
-        del embeddings
-        torch.mps.empty_cache()
+            # clear from mps device, otherwise it will throw an memory error
+            # embeddings.cpu()
+            del embeddings
+            torch.mps.empty_cache()

@@ -15,13 +15,11 @@ from mlx.nn import Conv1d as MLXConv1d, ReLU as MLXReLU
 from typing import Tuple
 
 
-def length_to_mask_mx(length, max_len=None, dtype=np.float32):
-    print(type(length))
+def length_to_mask_mx(length, max_len=None):
     assert len(length.shape) == 1
     if max_len is None:
-        max_len = np.max(length)
-    mask = np.arange(max_len)[None, :] < length[:, None]
-    mask = mask.astype(dtype)
+        max_len = mx.max(length)
+    mask = mx.arange(max_len)[None, :] < length[:, None]
     return mask
 
 
@@ -153,7 +151,7 @@ class Conv1d(nn.Module):
         elif self.padding == "causal":
             num_pad = (self.kernel_size - 1) * self.dilation
             padding_spec = [(0, 0)] * (x.ndim) + [(num_pad, 0)]
-            x = np.pad(x, padding_spec, mode="constant", constant_values=0)
+            x = mx.pad(x, padding_spec, mode="constant", constant_values=0)
 
         elif self.padding == "valid":
             pass
@@ -163,9 +161,9 @@ class Conv1d(nn.Module):
                 "Padding must be 'same', 'valid' or 'causal'. Got " + self.padding
             )
 
-        x = np.transpose(x, (0, 2, 1))
-        wx = self.mlx_conv(mx.array(x))
-        wx = np.transpose(wx, (0, 2, 1))
+        x = mx.transpose(x, (0, 2, 1))
+        wx = self.mlx_conv(x)
+        wx = mx.transpose(wx, (0, 2, 1))
         return wx
 
     def _manage_padding(
@@ -194,7 +192,7 @@ class Conv1d(nn.Module):
         # Time padding
         padding = get_padding_elem(L_in, stride, kernel_size, dilation)
         # Applying padding
-        x = np.pad(x, padding, mode=self.padding_mode)
+        x = mx.pad(x, padding)
         return x
 
     def _check_input_shape(self, shape):
@@ -303,7 +301,7 @@ class BatchNorm1d(nn.Module):
         elif not self.skip_transpose:
             x = x.transpose(-1, 1)
 
-        x_n = np.array(self.mlx_norm(mx.array(x)))
+        x_n = self.mlx_norm(x)
 
         if self.combine_batch_time:
             x_n = x_n.reshape(shape_or)
@@ -362,17 +360,11 @@ class TDNNBlock(nn.Module):
     def forward(self, x):
         """Processes the input tensor x and returns an output tensor."""
         x = self._manage_padding(x, self.kernel_size, 1, 1)
-        x = np.transpose(x, (0, 2, 1))
-        x = mx.array(x)  # .tolist())
-        print("x.shape", x.shape)
+        x = mx.transpose(x, (0, 2, 1))
         out = self.conv(x)
-        print("conv.out.shape", out.shape)
         out = self.activation(out)
-        print("activation.out.shape", out.shape)
-
-        out = np.transpose(out, (0, 2, 1))
+        out = mx.transpose(out, (0, 2, 1))
         out = self.norm(out)
-        print("norm.out.shape", out.shape)
         return out
 
     def _manage_padding(
@@ -405,7 +397,7 @@ class TDNNBlock(nn.Module):
 
         # Applying padding
         padding_spec = [(0, 0)] * (x.ndim - 1) + [padding]
-        x = np.pad(x, padding_spec, mode="reflect")
+        x = mx.pad(x, padding_spec)
 
         return x
 
@@ -459,8 +451,7 @@ class Res2NetBlock(torch.nn.Module):
     def forward(self, x):
         """Processes the input tensor x and returns an output tensor."""
         y = []
-        x = np.array(x)
-        x_chunks = np.array_split(x, self.scale, axis=1)
+        x_chunks = mx.split(x, self.scale, axis=1)
         for i, x_i in enumerate(x_chunks):
             if i == 0:
                 y_i = x_i
@@ -469,7 +460,7 @@ class Res2NetBlock(torch.nn.Module):
             else:
                 y_i = self.blocks[i - 1](x_i + y_i)
             y.append(y_i)
-        y = np.concatenate(y, axis=1)
+        y = mx.concatenate(y, axis=1)
         return y
 
 
@@ -508,24 +499,21 @@ class SEBlock(nn.Module):
 
     def forward(self, x, lengths=None):
         """Processes the input tensor x and returns an output tensor."""
-
-        x = np.array(x)
         L = x.shape[-1]
         if lengths is not None:
             mask = length_to_mask_mx(lengths * L, max_len=L)
-            mask = np.expand_dims(mask, axis=1)
-            total = np.sum(mask, axis=2, keepdims=True)
-            s = np.sum(x * mask, axis=2, keepdims=True) / total
+            mask = mx.expand_dims(mask, axis=1)
+            total = mx.sum(mask, axis=2, keepdims=True)
+            s = mx.sum(x * mask, axis=2, keepdims=True) / total
         else:
-            s = np.mean(x, axis=2, keepdims=True)
+            s = mx.mean(x, axis=2, keepdims=True)
 
-        s = np.transpose(s, (0, 2, 1))
-        s = mx.array(s.tolist())
+        s = mx.transpose(s, (0, 2, 1))
         s = self.relu(self.conv1(s))
         s = mx.sigmoid(self.conv2(s))
-        s = np.transpose(s, (0, 2, 1))
+        s = mx.transpose(s, (0, 2, 1))
 
-        out = s * mx.array(x)
+        out = s * x
         return out
 
 
@@ -571,16 +559,13 @@ class AttentiveStatisticsPooling(nn.Module):
         x : torch.Tensor
             Tensor of shape [N, C, L].
         """
-
-        # x = x.cpu().numpy()
-        x = np.array(x)
         L = x.shape[-1]
 
         def _compute_statistics(x, m, dim=2, eps=self.eps):
-            mean = np.sum(m * x, axis=dim)
-            std = np.sqrt(
-                np.clip(
-                    np.sum(m * (x - np.expand_dims(mean, axis=dim) ** 2), axis=dim),
+            mean = mx.sum(m * x, axis=dim)
+            std = mx.sqrt(
+                mx.clip(
+                    mx.sum(m * (x - mx.expand_dims(mean, axis=dim) ** 2), axis=dim),
                     a_min=eps,
                     a_max=None,
                 )
@@ -588,42 +573,45 @@ class AttentiveStatisticsPooling(nn.Module):
             return mean, std
 
         if lengths is None:
-            lengths = np.ones((x.shape[0]))
+            lengths = mx.ones((x.shape[0]))
 
-        print("lengths type is", type(lengths))
         # Make binary mask of shape [N, 1, L]
         mask = length_to_mask_mx(lengths * L, max_len=L)
-        mask = np.expand_dims(mask, axis=1)
+        mask = mx.expand_dims(mx.array(mask), axis=1)
 
         # Expand the temporal context of the pooling layer by allowing the
         # self-attention to look at global properties of the utterance.
         if self.global_context:
-            total = np.sum(mask, axis=2, keepdims=True).astype(float)
+            total = mx.sum(mask, axis=2, keepdims=True)
             mean, std = _compute_statistics(x, mask / total)
-            mean = np.repeat(np.expand_dims(mean, axis=2), L, axis=2)
-            std = np.repeat(np.expand_dims(std, axis=2), L, axis=2)
-            attn = np.concatenate([x, mean, std], axis=1)
+            mean = repeat(mx.expand_dims(mean, axis=2), L, axis=2)
+            std = repeat(mx.expand_dims(std, axis=2), L, axis=2)
+            attn = mx.concatenate([x, mean, std], axis=1)
         else:
             attn = x
 
         # attn is numpy array
         tdnn_out = self.tdnn.forward(attn)
         # # Apply layers
-        ftr = np.tanh(tdnn_out)
-        ftr = np.transpose(ftr, (0, 2, 1))
-        attn = self.conv(mx.array(ftr))
-        attn = np.transpose(attn, (0, 2, 1))
+        ftr = mx.tanh(tdnn_out)
+        ftr = mx.transpose(ftr, (0, 2, 1))
+        attn = self.conv(ftr)
+        attn = mx.transpose(attn, (0, 2, 1))
 
         # Filter out zero-paddings
-        attn = np.where(mask == 0, -np.inf, attn)
-
-        attn = np.exp(attn) / np.sum(np.exp(attn), axis=2, keepdims=True)
+        attn = mx.where(mask == 0, -np.inf, attn)
+        attn = mx.exp(attn) / mx.sum(mx.exp(attn), axis=2, keepdims=True)
         mean, std = _compute_statistics(x, attn)
+
         # Append mean and std of the batch
-        pooled_stats = np.concatenate((mean, std), axis=1)
-        pooled_stats = np.expand_dims(pooled_stats, axis=2)
+        pooled_stats = mx.concatenate((mean, std), axis=1)
+        pooled_stats = mx.expand_dims(pooled_stats, axis=2)
 
         return pooled_stats
+
+
+def repeat(x, L, axis):
+    return mx.concatenate([x] * L, axis=axis)
 
 
 class SERes2NetBlock(nn.Module):
@@ -799,6 +787,7 @@ class ECAPA_TDNN(torch.nn.Module):
             attention_channels=attention_channels,
             global_context=global_context,
         )
+
         self.asp_bn = BatchNorm1d(input_size=channels[-1] * 2, skip_transpose=True)
 
         # Final linear transformation
@@ -817,7 +806,7 @@ class ECAPA_TDNN(torch.nn.Module):
             Tensor of shape (batch, time, channel).
         """
         # Minimize transpose for efficiency
-        x = np.transpose(x, (0, 2, 1))
+        x = mx.transpose(x, (0, 2, 1))
 
         xl = []
         for layer in self.blocks:
@@ -828,18 +817,18 @@ class ECAPA_TDNN(torch.nn.Module):
             xl.append(x)
 
         # Multi-layer feature aggregation
-        xl = [np.array(item) for item in xl]
-        x = np.concatenate(xl[1:], axis=1)
+        x = mx.concatenate(xl[1:], axis=1)
         x = self.mfa(x)
 
         # Attentive Statistical Pooling
         x = self.asp(x, lengths=lengths)
+
         x = self.asp_bn(x)
 
         # Final linear transformation
         x = self.fc(x)
 
-        x = np.transpose(x, (0, 2, 1))
+        x = mx.transpose(x, (0, 2, 1))
         return x
 
 
@@ -853,12 +842,12 @@ if __name__ == "__main__":
         attention_channels=128,
     )
     # test example from audio pipeline
-    features = np.random.rand(1, 501, 80)
-    wav_lens = np.random.rand(1)
+    features = mx.random.normal([64, 501, 80])
+    wav_lens = mx.random.normal([64])
 
     import time
 
-    for _ in range(20):
+    for _ in range(100):
         start = time.time()
         # with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
         #     with record_function("model_inference"):
@@ -869,7 +858,7 @@ if __name__ == "__main__":
         end = time.time()
         print("embeddings.shape: ", embeddings.shape)
         print("time taken: ", end - start)
-        assert embeddings.shape == [1, 1, 192]
+        assert embeddings.shape == [64, 1, 192]
 
         # clear from mps device, otherwise it will throw an memory error
         # del embeddings

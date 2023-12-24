@@ -3,16 +3,14 @@ Models code from speechbrain
 (https://github.com/speechbrain/speechbrain/blob/develop/speechbrain/lobes/models/)
 """
 
-import numpy as np
-import torch
-import torch.nn as nn
 import math
-from torch.profiler import profile, record_function, ProfilerActivity
 
+import numpy as np
 import mlx.core as mx
+import mlx.nn as nn
 from ..layers.norm import BatchNorm
 from mlx.nn import Conv1d as MLXConv1d, ReLU as MLXReLU
-from typing import Tuple
+from typing import Any
 
 
 def length_to_mask_mx(length, max_len=None):
@@ -128,7 +126,7 @@ class Conv1d(nn.Module):
 
         self.in_channels = in_channels
 
-        self.mlx_conv = MLXConv1d(
+        self.conv = MLXConv1d(
             in_channels,
             out_channels,
             self.kernel_size,
@@ -162,9 +160,12 @@ class Conv1d(nn.Module):
             )
 
         x = mx.transpose(x, (0, 2, 1))
-        wx = self.mlx_conv(x)
+        wx = self.conv(x)
         wx = mx.transpose(wx, (0, 2, 1))
         return wx
+
+    def __call__(self, *args: Any, **kwds: Any) -> Any:
+        return self.forward(*args, **kwds)
 
     def _manage_padding(
         self,
@@ -274,7 +275,7 @@ class BatchNorm1d(nn.Module):
         elif input_size is None:
             input_size = input_shape[-1]
 
-        self.mlx_norm = BatchNorm(
+        self.norm = BatchNorm(
             num_features=input_size,
             eps=eps,
             momentum=momentum,
@@ -301,7 +302,7 @@ class BatchNorm1d(nn.Module):
         elif not self.skip_transpose:
             x = x.transpose(-1, 1)
 
-        x_n = self.mlx_norm(x)
+        x_n = self.norm(x)
 
         if self.combine_batch_time:
             x_n = x_n.reshape(shape_or)
@@ -309,6 +310,9 @@ class BatchNorm1d(nn.Module):
             x_n = x_n.transpose(1, -1)
 
         return x_n
+
+    def __call__(self, *args: Any, **kwds: Any) -> Any:
+        return self.forward(*args, **kwds)
 
 
 class TDNNBlock(nn.Module):
@@ -367,6 +371,9 @@ class TDNNBlock(nn.Module):
         out = self.norm(out)
         return out
 
+    def __call__(self, *args: Any, **kwds: Any) -> Any:
+        return self.forward(*args, **kwds)
+
     def _manage_padding(
         self,
         x,
@@ -402,7 +409,7 @@ class TDNNBlock(nn.Module):
         return x
 
 
-class Res2NetBlock(torch.nn.Module):
+class Res2NetBlock(nn.Module):
     """An implementation of Res2NetBlock w/ dilation.
 
     Arguments
@@ -435,17 +442,15 @@ class Res2NetBlock(torch.nn.Module):
         in_channel = in_channels // scale
         hidden_channel = out_channels // scale
 
-        self.blocks = nn.ModuleList(
-            [
-                TDNNBlock(
-                    in_channel,
-                    hidden_channel,
-                    kernel_size=kernel_size,
-                    dilation=dilation,
-                )
-                for i in range(scale - 1)
-            ]
-        )
+        self.blocks = [
+            TDNNBlock(
+                in_channel,
+                hidden_channel,
+                kernel_size=kernel_size,
+                dilation=dilation,
+            )
+            for i in range(scale - 1)
+        ]
         self.scale = scale
 
     def forward(self, x):
@@ -462,6 +467,9 @@ class Res2NetBlock(torch.nn.Module):
             y.append(y_i)
         y = mx.concatenate(y, axis=1)
         return y
+
+    def __call__(self, *args: Any, **kwds: Any) -> Any:
+        return self.forward(*args, **kwds)
 
 
 class SEBlock(nn.Module):
@@ -515,6 +523,9 @@ class SEBlock(nn.Module):
 
         out = s * x
         return out
+
+    def __call__(self, *args: Any, **kwds: Any) -> Any:
+        return self.forward(*args, **kwds)
 
 
 class AttentiveStatisticsPooling(nn.Module):
@@ -599,6 +610,7 @@ class AttentiveStatisticsPooling(nn.Module):
         attn = mx.transpose(attn, (0, 2, 1))
 
         # Filter out zero-paddings
+        # Keep numpy here for np.inf, "math.inf" is slow
         attn = mx.where(mask == 0, -np.inf, attn)
         attn = mx.exp(attn) / mx.sum(mx.exp(attn), axis=2, keepdims=True)
         mean, std = _compute_statistics(x, attn)
@@ -608,6 +620,9 @@ class AttentiveStatisticsPooling(nn.Module):
         pooled_stats = mx.expand_dims(pooled_stats, axis=2)
 
         return pooled_stats
+
+    def __call__(self, *args: Any, **kwds: Any) -> Any:
+        return self.forward(*args, **kwds)
 
 
 def repeat(x, L, axis):
@@ -695,8 +710,11 @@ class SERes2NetBlock(nn.Module):
 
         return x + residual
 
+    def __call__(self, *args: Any, **kwds: Any) -> Any:
+        return self.forward(*args, **kwds)
 
-class ECAPA_TDNN(torch.nn.Module):
+
+class ECAPA_TDNN(nn.Module):
     """An implementation of the speaker embedding model in a paper.
     "ECAPA-TDNN: Emphasized Channel Attention, Propagation and Aggregation in
     TDNN Based Speaker Verification" (https://arxiv.org/abs/2005.07143).
@@ -745,7 +763,7 @@ class ECAPA_TDNN(torch.nn.Module):
         assert len(channels) == len(kernel_sizes)
         assert len(channels) == len(dilations)
         self.channels = channels
-        self.blocks = nn.ModuleList()
+        self.blocks = []
 
         # The initial TDNN layer
         self.blocks.append(
@@ -831,6 +849,9 @@ class ECAPA_TDNN(torch.nn.Module):
         x = mx.transpose(x, (0, 2, 1))
         return x
 
+    def __call__(self, *args: Any, **kwds: Any) -> Any:
+        return self.forward(*args, **kwds)
+
 
 if __name__ == "__main__":
     ecapa_tdnn = ECAPA_TDNN(
@@ -847,18 +868,12 @@ if __name__ == "__main__":
 
     import time
 
-    for _ in range(100):
+    for _ in range(1):
         start = time.time()
-        # with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
-        #     with record_function("model_inference"):
         embeddings = ecapa_tdnn.forward(features, wav_lens)
-        # print(
-        #     prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=100)
-        # )
         end = time.time()
         print("embeddings.shape: ", embeddings.shape)
         print("time taken: ", end - start)
         assert embeddings.shape == [64, 1, 192]
-
         # clear from mps device, otherwise it will throw an memory error
         # del embeddings

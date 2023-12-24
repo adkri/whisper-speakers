@@ -6,7 +6,6 @@ Models code from speechbrain
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import math
 from torch.profiler import profile, record_function, ProfilerActivity
 
@@ -148,16 +147,13 @@ class Conv1d(nn.Module):
         x : torch.Tensor (batch, time, channel)
             input to convolve. 2d or 4d tensors are expected.
         """
-        x = x.cpu().numpy()
         if self.padding == "same":
             x = self._manage_padding(x, self.kernel_size, self.dilation, self.stride)
 
         elif self.padding == "causal":
             num_pad = (self.kernel_size - 1) * self.dilation
-            # x = x.cpu().numpy()
             padding_spec = [(0, 0)] * (x.ndim) + [(num_pad, 0)]
             x = np.pad(x, padding_spec, mode="constant", constant_values=0)
-            # x = torch.from_numpy(x).to(torch.device("mps"))
 
         elif self.padding == "valid":
             pass
@@ -167,12 +163,9 @@ class Conv1d(nn.Module):
                 "Padding must be 'same', 'valid' or 'causal'. Got " + self.padding
             )
 
-        # x = x.permute(0, 2, 1)
         x = np.transpose(x, (0, 2, 1))
-        wx = torch.from_numpy(np.array(self.mlx_conv(mx.array(x)))).to(
-            torch.device("mps")
-        )
-        wx = wx.permute(0, 2, 1)
+        wx = self.mlx_conv(mx.array(x))
+        wx = np.transpose(wx, (0, 2, 1))
         return wx
 
     def _manage_padding(
@@ -301,7 +294,6 @@ class BatchNorm1d(nn.Module):
             4d tensors can be used when combine_dims=True.
         """
         shape_or = x.shape
-        x = x.cpu().numpy()
         if self.combine_batch_time:
             if x.ndim == 3:
                 x = x.reshape(shape_or[0] * shape_or[1], shape_or[2])
@@ -318,7 +310,7 @@ class BatchNorm1d(nn.Module):
         elif not self.skip_transpose:
             x_n = x_n.transpose(1, -1)
 
-        return torch.from_numpy(x_n).to(torch.device("mps"))
+        return x_n
 
 
 class TDNNBlock(nn.Module):
@@ -353,8 +345,7 @@ class TDNNBlock(nn.Module):
         in_channels,
         out_channels,
         kernel_size,
-        dilation,
-        activation=nn.ReLU,
+        dilation=1,
         groups=1,
     ):
         super(TDNNBlock, self).__init__()
@@ -370,10 +361,9 @@ class TDNNBlock(nn.Module):
 
     def forward(self, x):
         """Processes the input tensor x and returns an output tensor."""
-        x = x.cpu().numpy()
         x = self._manage_padding(x, self.kernel_size, 1, 1)
         x = np.transpose(x, (0, 2, 1))
-        x = mx.array(x.tolist())
+        x = mx.array(x)  # .tolist())
         print("x.shape", x.shape)
         out = self.conv(x)
         print("conv.out.shape", out.shape)
@@ -383,7 +373,7 @@ class TDNNBlock(nn.Module):
         out = np.transpose(out, (0, 2, 1))
         out = self.norm(out)
         print("norm.out.shape", out.shape)
-        return torch.from_numpy(np.array(out)).to(torch.device("mps"))
+        return out
 
     def _manage_padding(
         self,
@@ -414,10 +404,8 @@ class TDNNBlock(nn.Module):
         padding = get_padding_elem(L_in, stride, kernel_size, dilation)
 
         # Applying padding
-        # x = np.array(x.cpu().tolist(), dtype=np.float32)
         padding_spec = [(0, 0)] * (x.ndim - 1) + [padding]
         x = np.pad(x, padding_spec, mode="reflect")
-        # x = torch.from_numpy(x).to(torch.device("mps"))
 
         return x
 
@@ -471,18 +459,17 @@ class Res2NetBlock(torch.nn.Module):
     def forward(self, x):
         """Processes the input tensor x and returns an output tensor."""
         y = []
-        x_chunks = np.array_split(x.cpu().numpy(), self.scale, axis=1)
+        x = np.array(x)
+        x_chunks = np.array_split(x, self.scale, axis=1)
         for i, x_i in enumerate(x_chunks):
-            x_i = torch.from_numpy(x_i).to(torch.device("mps"))
             if i == 0:
                 y_i = x_i
             elif i == 1:
                 y_i = self.blocks[i - 1](x_i)
             else:
                 y_i = self.blocks[i - 1](x_i + y_i)
-            y.append(y_i.cpu().numpy())
+            y.append(y_i)
         y = np.concatenate(y, axis=1)
-        y = torch.from_numpy(y).to(torch.device("mps"))
         return y
 
 
@@ -522,7 +509,7 @@ class SEBlock(nn.Module):
     def forward(self, x, lengths=None):
         """Processes the input tensor x and returns an output tensor."""
 
-        x = x.cpu().numpy()
+        x = np.array(x)
         L = x.shape[-1]
         if lengths is not None:
             mask = length_to_mask_mx(lengths * L, max_len=L)
@@ -539,8 +526,6 @@ class SEBlock(nn.Module):
         s = np.transpose(s, (0, 2, 1))
 
         out = s * mx.array(x)
-        out = torch.from_numpy(np.array(out)).to(torch.device("mps"))
-
         return out
 
 
@@ -574,7 +559,6 @@ class AttentiveStatisticsPooling(nn.Module):
             self.tdnn = TDNNBlock(channels * 3, attention_channels, 1, 1)
         else:
             self.tdnn = TDNNBlock(channels, attention_channels, 1, 1)
-        # self.tanh = nn.Tanh()
         self.conv = MLXConv1d(
             in_channels=attention_channels, out_channels=channels, kernel_size=1
         )
@@ -588,15 +572,11 @@ class AttentiveStatisticsPooling(nn.Module):
             Tensor of shape [N, C, L].
         """
 
-        x = x.cpu().numpy()
+        # x = x.cpu().numpy()
+        x = np.array(x)
         L = x.shape[-1]
 
-        print("x type is", type(x))
-        print("L type is", type(L))
-
         def _compute_statistics(x, m, dim=2, eps=self.eps):
-            # mean = (m * x).sum(dim)
-            # std = torch.sqrt((m * (x - mean.unsqueeze(dim)).pow(2)).sum(dim).clamp(eps))
             mean = np.sum(m * x, axis=dim)
             std = np.sqrt(
                 np.clip(
@@ -609,27 +589,15 @@ class AttentiveStatisticsPooling(nn.Module):
 
         if lengths is None:
             lengths = np.ones((x.shape[0]))
-            # lengths = torch.ones(x.shape[0], device=x.device)
-        else:
-            lengths = lengths.cpu().numpy()
 
         print("lengths type is", type(lengths))
         # Make binary mask of shape [N, 1, L]
-        # mask = length_to_mask(lengths * L, max_len=L, device=x.device)
         mask = length_to_mask_mx(lengths * L, max_len=L)
-        # mask = mask.unsqueeze(1)
         mask = np.expand_dims(mask, axis=1)
 
         # Expand the temporal context of the pooling layer by allowing the
         # self-attention to look at global properties of the utterance.
         if self.global_context:
-            # torch.std is unstable for backward computation
-            # https://github.com/pytorch/pytorch/issues/4320
-            # total = mask.sum(dim=2, keepdim=True).float()
-            # mean, std = _compute_statistics(x, mask / total)
-            # mean = mean.unsqueeze(2).repeat(1, 1, L)
-            # std = std.unsqueeze(2).repeat(1, 1, L)
-            # attn = torch.cat([x, mean, std], dim=1)
             total = np.sum(mask, axis=2, keepdims=True).astype(float)
             mean, std = _compute_statistics(x, mask / total)
             mean = np.repeat(np.expand_dims(mean, axis=2), L, axis=2)
@@ -639,36 +607,21 @@ class AttentiveStatisticsPooling(nn.Module):
             attn = x
 
         # attn is numpy array
-        attn_tensor = torch.from_numpy(attn).clone()
-
-        tdnn_out = self.tdnn.forward(attn_tensor)
-        ftr = np.tanh(tdnn_out.cpu().numpy())
-
+        tdnn_out = self.tdnn.forward(attn)
+        # # Apply layers
+        ftr = np.tanh(tdnn_out)
         ftr = np.transpose(ftr, (0, 2, 1))
         attn = self.conv(mx.array(ftr))
         attn = np.transpose(attn, (0, 2, 1))
 
+        # Filter out zero-paddings
         attn = np.where(mask == 0, -np.inf, attn)
 
         attn = np.exp(attn) / np.sum(np.exp(attn), axis=2, keepdims=True)
         mean, std = _compute_statistics(x, attn)
+        # Append mean and std of the batch
         pooled_stats = np.concatenate((mean, std), axis=1)
         pooled_stats = np.expand_dims(pooled_stats, axis=2)
-
-        pooled_stats = torch.from_numpy(pooled_stats).to(torch.device("mps"))
-
-        # # Apply layers
-        # ftr = mx.tanh(self.tdnn(attn))
-        # attn = self.conv(ftr)
-
-        # # Filter out zero-paddings
-        # attn = attn.masked_fill(mask == 0, float("-inf"))
-
-        # attn = mx.softmax(attn, axis=2)
-        # mean, std = _compute_statistics(x, attn)
-        # # Append mean and std of the batch
-        # pooled_stats = torch.cat((mean, std), dim=1)
-        # pooled_stats = pooled_stats.unsqueeze(2)
 
         return pooled_stats
 
@@ -709,7 +662,6 @@ class SERes2NetBlock(nn.Module):
         se_channels=128,
         kernel_size=1,
         dilation=1,
-        activation=torch.nn.ReLU,
         groups=1,
     ):
         super().__init__()
@@ -719,7 +671,6 @@ class SERes2NetBlock(nn.Module):
             out_channels,
             kernel_size=1,
             dilation=1,
-            activation=activation,
             groups=groups,
         )
         self.res2net_block = Res2NetBlock(
@@ -730,7 +681,6 @@ class SERes2NetBlock(nn.Module):
             out_channels,
             kernel_size=1,
             dilation=1,
-            activation=activation,
             groups=groups,
         )
         self.se_block = SEBlock(out_channels, se_channels, out_channels)
@@ -749,7 +699,6 @@ class SERes2NetBlock(nn.Module):
         if self.shortcut:
             x = mx.array(x.tolist())
             residual = self.shortcut(x)
-            residual = torch.from_numpy(np.array(residual)).to(torch.device("mps"))
 
         x = self.tdnn1(x)
         x = self.res2net_block(x)
@@ -795,7 +744,6 @@ class ECAPA_TDNN(torch.nn.Module):
         input_size,
         device="mps",
         lin_neurons=192,
-        activation=torch.nn.ReLU,
         channels=[512, 512, 512, 512, 1536],
         kernel_sizes=[5, 3, 3, 3, 1],
         dilations=[1, 2, 3, 4, 1],
@@ -817,9 +765,8 @@ class ECAPA_TDNN(torch.nn.Module):
                 input_size,
                 channels[0],
                 kernel_sizes[0],
-                dilations[0],
-                activation,
-                groups[0],
+                dilation=dilations[0],
+                groups=groups[0],
             )
         )
 
@@ -833,7 +780,6 @@ class ECAPA_TDNN(torch.nn.Module):
                     se_channels=se_channels,
                     kernel_size=kernel_sizes[i],
                     dilation=dilations[i],
-                    activation=activation,
                     groups=groups[i],
                 )
             )
@@ -843,8 +789,7 @@ class ECAPA_TDNN(torch.nn.Module):
             channels[-2] * (len(channels) - 2),
             channels[-1],
             kernel_sizes[-1],
-            dilations[-1],
-            activation,
+            dilation=dilations[-1],
             groups=groups[-1],
         )
 
@@ -872,7 +817,7 @@ class ECAPA_TDNN(torch.nn.Module):
             Tensor of shape (batch, time, channel).
         """
         # Minimize transpose for efficiency
-        x = x.transpose(1, 2)
+        x = np.transpose(x, (0, 2, 1))
 
         xl = []
         for layer in self.blocks:
@@ -883,10 +828,8 @@ class ECAPA_TDNN(torch.nn.Module):
             xl.append(x)
 
         # Multi-layer feature aggregation
-        xl = [item.cpu().numpy() for item in xl]
+        xl = [np.array(item) for item in xl]
         x = np.concatenate(xl[1:], axis=1)
-        x = torch.from_numpy(x).to(torch.device("mps"))
-
         x = self.mfa(x)
 
         # Attentive Statistical Pooling
@@ -896,7 +839,7 @@ class ECAPA_TDNN(torch.nn.Module):
         # Final linear transformation
         x = self.fc(x)
 
-        x = x.transpose(1, 2)
+        x = np.transpose(x, (0, 2, 1))
         return x
 
 
@@ -909,36 +852,24 @@ if __name__ == "__main__":
         dilations=[1, 2, 3, 4, 1],
         attention_channels=128,
     )
-
-    # load model weights
-    # model_path = (
-    #     "/Users/amit/stream/whisper_tests/spkrec-ecapa-voxceleb/embedding_model.ckpt"
-    # )
-    # ecapa_tdnn.load_state_dict(torch.load(model_path, map_location=torch.device("cpu")))
-
-    ecapa_tdnn.eval()
-
     # test example from audio pipeline
-    features = torch.rand([1, 501, 80]).to(torch.device("mps"))
-    wav_lens = torch.rand([1]).to(torch.device("mps"))
+    features = np.random.rand(1, 501, 80)
+    wav_lens = np.random.rand(1)
 
     import time
 
-    with torch.no_grad():
-        for _ in range(1):
-            start = time.time()
-            # with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
-            #     with record_function("model_inference"):
-            embeddings = ecapa_tdnn.forward(features, wav_lens)
-            # print(
-            #     prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=100)
-            # )
-            end = time.time()
-            print("embeddings.shape: ", embeddings.shape)
-            print("time taken: ", end - start)
-            assert embeddings.shape == (64, 1, 192)
+    for _ in range(20):
+        start = time.time()
+        # with profile(activities=[ProfilerActivity.CPU], record_shapes=True) as prof:
+        #     with record_function("model_inference"):
+        embeddings = ecapa_tdnn.forward(features, wav_lens)
+        # print(
+        #     prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=100)
+        # )
+        end = time.time()
+        print("embeddings.shape: ", embeddings.shape)
+        print("time taken: ", end - start)
+        assert embeddings.shape == [1, 1, 192]
 
-            # clear from mps device, otherwise it will throw an memory error
-            # embeddings.cpu()
-            del embeddings
-            torch.mps.empty_cache()
+        # clear from mps device, otherwise it will throw an memory error
+        # del embeddings

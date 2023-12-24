@@ -868,7 +868,12 @@ class ECAPA_TDNN(nn.Module):
         return self.forward(*args, **kwds)
 
 
-if __name__ == "__main__":
+def load_embedding_model(
+    file_path: str = "embedding_model.ckpt",
+) -> ECAPA_TDNN:
+    from mlx.utils import tree_map
+    import torch
+
     ecapa_tdnn = ECAPA_TDNN(
         80,  # input_size
         lin_neurons=192,
@@ -877,6 +882,27 @@ if __name__ == "__main__":
         dilations=[1, 2, 3, 4, 1],
         attention_channels=128,
     )
+
+    params = torch.load(file_path, map_location="cpu")
+    params = tree_map(lambda p: mx.array(p.numpy(), dtype=mx.float32), params)
+    # TODO: model.update(params) doesn't work and so model.load_weights() will also not work
+    # set params manually
+    for k, v in params.items():
+        ecapa_tdnn[k] = v
+
+    return ecapa_tdnn
+
+
+if __name__ == "__main__":
+    ecapa_tdnn = load_embedding_model()
+    # ecapa_tdnn = ECAPA_TDNN(
+    #     80,  # input_size
+    #     lin_neurons=192,
+    #     channels=[1024, 1024, 1024, 1024, 3072],
+    #     kernel_sizes=[5, 3, 3, 3, 1],
+    #     dilations=[1, 2, 3, 4, 1],
+    #     attention_channels=128,
+    # )
     # test example from audio pipeline
     features = mx.random.normal([64, 501, 80])
     wav_lens = mx.random.normal([64])

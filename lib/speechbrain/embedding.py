@@ -301,6 +301,7 @@ class BatchNorm1d(nn.Module):
             4d tensors can be used when combine_dims=True.
         """
         shape_or = x.shape
+        x = x.cpu().numpy()
         if self.combine_batch_time:
             if x.ndim == 3:
                 x = x.reshape(shape_or[0] * shape_or[1], shape_or[2])
@@ -310,15 +311,14 @@ class BatchNorm1d(nn.Module):
         elif not self.skip_transpose:
             x = x.transpose(-1, 1)
 
-        x_n = np.array(self.mlx_norm(mx.array(x.cpu().numpy())))
-        x_n = torch.from_numpy(x_n).to(torch.device("mps"))
+        x_n = np.array(self.mlx_norm(mx.array(x)))
 
         if self.combine_batch_time:
             x_n = x_n.reshape(shape_or)
         elif not self.skip_transpose:
             x_n = x_n.transpose(1, -1)
 
-        return x_n
+        return torch.from_numpy(x_n).to(torch.device("mps"))
 
 
 class TDNNBlock(nn.Module):
@@ -358,15 +358,6 @@ class TDNNBlock(nn.Module):
         groups=1,
     ):
         super(TDNNBlock, self).__init__()
-        # self.conv = Conv1d(
-        #     in_channels=in_channels,
-        #     out_channels=out_channels,
-        #     kernel_size=kernel_size,
-        #     dilation=dilation,
-        #     groups=groups,
-        # )
-        # self.activation = activation()
-        # self.norm = BatchNorm1d(input_size=out_channels, skip_transpose=True)
         self.in_channels = in_channels
         self.kernel_size = kernel_size
         self.conv = MLXConv1d(
@@ -374,15 +365,14 @@ class TDNNBlock(nn.Module):
             out_channels=out_channels,
             kernel_size=kernel_size,
         )
-
         self.activation = MLXReLU()
-
         self.norm = BatchNorm(out_channels)
 
     def forward(self, x):
         """Processes the input tensor x and returns an output tensor."""
+        x = x.cpu().numpy()
         x = self._manage_padding(x, self.kernel_size, 1, 1)
-        x = x.permute(0, 2, 1)
+        x = np.transpose(x, (0, 2, 1))
         x = mx.array(x.tolist())
         print("x.shape", x.shape)
         out = self.conv(x)
@@ -394,13 +384,6 @@ class TDNNBlock(nn.Module):
         out = self.norm(out)
         print("norm.out.shape", out.shape)
         return torch.from_numpy(np.array(out)).to(torch.device("mps"))
-
-        # x = x.permute(0, 2, 1)
-        # x = mx.array(x.tolist())
-        # out = self.norm(self.activation(self.conv(x)))
-        # out = torch.from_numpy(np.array(out)).to(torch.device("mps"))
-        # out = out.permute(0, 2, 1)
-        # return out
 
     def _manage_padding(
         self,
@@ -431,10 +414,10 @@ class TDNNBlock(nn.Module):
         padding = get_padding_elem(L_in, stride, kernel_size, dilation)
 
         # Applying padding
-        x = np.array(x.cpu().tolist(), dtype=np.float32)
+        # x = np.array(x.cpu().tolist(), dtype=np.float32)
         padding_spec = [(0, 0)] * (x.ndim - 1) + [padding]
         x = np.pad(x, padding_spec, mode="reflect")
-        x = torch.from_numpy(x).to(torch.device("mps"))
+        # x = torch.from_numpy(x).to(torch.device("mps"))
 
         return x
 
@@ -488,15 +471,18 @@ class Res2NetBlock(torch.nn.Module):
     def forward(self, x):
         """Processes the input tensor x and returns an output tensor."""
         y = []
-        for i, x_i in enumerate(torch.chunk(x, self.scale, dim=1)):
+        x_chunks = np.array_split(x.cpu().numpy(), self.scale, axis=1)
+        for i, x_i in enumerate(x_chunks):
+            x_i = torch.from_numpy(x_i).to(torch.device("mps"))
             if i == 0:
                 y_i = x_i
             elif i == 1:
                 y_i = self.blocks[i - 1](x_i)
             else:
                 y_i = self.blocks[i - 1](x_i + y_i)
-            y.append(y_i)
-        y = torch.cat(y, dim=1)
+            y.append(y_i.cpu().numpy())
+        y = np.concatenate(y, axis=1)
+        y = torch.from_numpy(y).to(torch.device("mps"))
         return y
 
 
@@ -532,15 +518,6 @@ class SEBlock(nn.Module):
         self.conv2 = MLXConv1d(
             in_channels=se_channels, out_channels=out_channels, kernel_size=1
         )
-
-        # self.conv1 = Conv1d(
-        #     in_channels=in_channels, out_channels=se_channels, kernel_size=1
-        # )
-        # self.relu = torch.nn.ReLU(inplace=True)
-        # self.conv2 = Conv1d(
-        #     in_channels=se_channels, out_channels=out_channels, kernel_size=1
-        # )
-        self.sigmoid = torch.nn.Sigmoid()
 
     def forward(self, x, lengths=None):
         """Processes the input tensor x and returns an output tensor."""
@@ -906,7 +883,10 @@ class ECAPA_TDNN(torch.nn.Module):
             xl.append(x)
 
         # Multi-layer feature aggregation
-        x = torch.cat(xl[1:], dim=1)
+        xl = [item.cpu().numpy() for item in xl]
+        x = np.concatenate(xl[1:], axis=1)
+        x = torch.from_numpy(x).to(torch.device("mps"))
+
         x = self.mfa(x)
 
         # Attentive Statistical Pooling

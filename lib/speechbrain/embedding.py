@@ -904,17 +904,20 @@ if __name__ == "__main__":
     #     attention_channels=128,
     # )
     # test example from audio pipeline
-    features = mx.random.normal([64, 501, 80])
-    wav_lens = mx.random.normal([64])
+    features = mx.random.normal([2048, 501, 80])
+    wav_lens = mx.random.normal([2048])
+
+    # features = mx.random.normal([1, 4, 80])
+    # wav_lens = mx.random.normal([1
 
     import time
 
-    for _ in range(1):
+    for _ in range(10):
         start = time.time()
         embeddings = ecapa_tdnn.forward(features, wav_lens)
         end = time.time()
         print("embeddings.shape: ", embeddings.shape)
         print("time taken: ", end - start)
-        assert embeddings.shape == [64, 1, 192]
+        # assert embeddings.shape == [64, 1, 192]
         # clear from mps device, otherwise it will throw an memory error
         # del embeddings

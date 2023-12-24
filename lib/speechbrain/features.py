@@ -104,7 +104,7 @@ class STFT(nn.Module):
         # Managing multi-channel stft
         or_shape = x.shape
         if len(or_shape) == 3:
-            x = x.transpose(1, 2)
+            x = mx.transpose(x, (0, 1, 2))
             x = x.reshape(or_shape[0] * or_shape[2], or_shape[1])
 
         # convert mx array to numpy for torch
@@ -314,6 +314,7 @@ class Filterbank(nn.Module):
         # Managing multi-channels case (batch, time, channels)
         if len(sp_shape) == 4:
             spectrogram = spectrogram.permute(0, 3, 1, 2)
+            # spectrogram = spectrogram.transpose(0, 3, 1, 2)
             spectrogram = spectrogram.reshape(
                 sp_shape[0] * sp_shape[3], sp_shape[1], sp_shape[2]
             )
@@ -328,8 +329,9 @@ class Filterbank(nn.Module):
             fb_shape = fbanks.shape
             fbanks = fbanks.reshape(sp_shape[0], sp_shape[3], fb_shape[1], fb_shape[2])
             fbanks = fbanks.permute(0, 2, 3, 1)
+            # fbanks = fbanks.transpose(0, 2, 3, 1)
 
-        return fbanks
+        return mx.array(fbanks)
 
     @staticmethod
     def _to_mel(hz):
@@ -660,7 +662,7 @@ if __name__ == "__main__":
 
     # test Fbank
     inputs = mx.random.normal([10, 16000])
-    feature_maker = Fbank()
+    feature_maker = Fbank(n_mels=80)
     feats = feature_maker(inputs)
     print(feats.shape)
     assert feats.shape == (10, 101, 40)
